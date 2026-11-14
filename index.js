@@ -15,9 +15,11 @@ import {
   writeCredentials,
 } from './lib/config.js'
 import { issueLines, setupGuidance } from './lib/guidance.js'
+import { campusInterfaces, classifyNetwork, probeTcp } from './lib/network.js'
+import { describeRuntime, sshReadiness } from './lib/platform.js'
 import { BindingError, parseBindingText } from './lib/setup.js'
 import { SKILL_CONTENT, SKILL_DESCRIPTION, SKILL_NAME, SKILL_WHEN_TO_USE } from './lib/skill.js'
-import { probePort, runRemoteCommand } from './lib/ssh.js'
+import { runRemoteCommand } from './lib/ssh.js'
 
 export const name = 'weiming-hpc'
 export const inject = ['tools']
@@ -37,6 +39,8 @@ function judge(result) {
   if (result.aborted) return 'aborted'
   if (result.timedOut) return 'timeout'
   if (result.authFailed) return 'auth-failed'
+  if (result.networkError) return 'unreachable'
+  if (result.hostKeyFailed) return 'host-key'
   return 'ok'
 }
 
@@ -48,6 +52,10 @@ function remoteMessage(status, result, timeoutMs) {
       return `本地超时（${Math.round(timeoutMs / 1000)} 秒）；远程进程可能仍在运行。`
     case 'aborted':
       return '调用已取消；远程进程可能仍在运行。'
+    case 'unreachable':
+      return '无法建立 SSH 连接：网络路径不可达（可能未连校园网/VPN、节点维护或本机防火墙）。'
+    case 'host-key':
+      return '主机密钥校验失败：目标主机不在 known_hosts 中，或记录的密钥与当前主机不一致。'
     default:
       return result.exitCode === 0 ? '' : `远程命令返回退出码 ${result.exitCode}。`
   }
@@ -61,6 +69,10 @@ function remoteNextStep(status) {
       return '先确认远程是否已经产生结果，再决定是否重跑；不要盲目重复提交。'
     case 'aborted':
       return '需要结果时重新执行一次，并先确认上一次是否已生效。'
+    case 'unreachable':
+      return '先确认已连接北大校园网或学校 VPN（https://vpn.pku.edu.cn），再检查目标节点状态；不要反复重试同一节点。'
+    case 'host-key':
+      return '请在终端用 ssh 首次连接该节点并核对指纹（不要关闭 StrictHostKeyChecking）；若指纹变化，先通过可信渠道确认再更新 known_hosts。'
     case 'ok':
       return ''
     default:
@@ -99,6 +111,28 @@ const statusSchema = {
         },
       },
     },
+    runtime: {
+      type: 'object',
+      required: true,
+      additionalProperties: false,
+      properties: {
+        platform: { type: 'string', required: true },
+        ssh: { type: 'string', required: true },
+        auth: { type: 'string', required: true, enum: ['askpass', 'unsupported'] },
+        message: { type: 'string', required: true },
+      },
+    },
+    network: {
+      type: 'object',
+      required: true,
+      additionalProperties: false,
+      properties: {
+        status: { type: 'string', required: true, enum: ['unknown', 'reachable', 'off-campus', 'offline', 'dns', 'blocked'] },
+        message: { type: 'string', required: true },
+        nextStep: { type: 'string', required: true },
+        localCampus: { type: 'boolean', required: true },
+      },
+    },
     nextStep: { type: 'string', required: true },
   },
 }
@@ -110,10 +144,16 @@ function renderStatus(value) {
   if (value.totpFingerprint !== '') {
     lines.push(`OTP：${value.totpAlgorithm}/${value.totpDigits} 位/${value.totpPeriod} 秒，密钥指纹 ${value.totpFingerprint}（Base32 长度 ${value.totpSecretLength}）`)
   }
+  lines.push(`运行环境：${value.runtime.platform} · ssh ${value.runtime.ssh === '' ? '未找到' : value.runtime.ssh} · ${value.runtime.auth === 'askpass' ? 'askpass 可用' : 'askpass 不可用'}`)
+  if (value.runtime.message !== '') lines.push(clip(value.runtime.message, 600))
   lines.push('目标节点：')
   for (const target of value.targets) {
     const reach = target.reachable === 'reachable' ? '（22 端口可达）' : target.reachable === 'unreachable' ? '（22 端口不可达）' : ''
     lines.push(`  - ${target.target} → ${target.user}@${target.host}${reach}`)
+  }
+  if (value.network.status !== 'unknown') {
+    lines.push(`网络：${value.network.message}`)
+    if (value.network.localCampus) lines.push('本机地址属于校园网段。')
   }
   if (value.issues.length > 0) {
     lines.push('问题：')
@@ -189,7 +229,7 @@ const runSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    status: { type: 'string', required: true, enum: ['ok', 'setup-required', 'auth-failed', 'timeout', 'aborted', 'error'] },
+    status: { type: 'string', required: true, enum: ['ok', 'setup-required', 'network-unavailable', 'auth-failed', 'host-key', 'timeout', 'aborted', 'unreachable', 'error'] },
     target: { type: 'string', required: true },
     address: { type: 'string', required: true },
     exitCode: { type: 'number', required: true },
@@ -220,23 +260,46 @@ function renderRun(value) {
 
 const statusTool = defineTool({
   name: 'wm_server_status',
-  description: '检查未名 HPC（wm1/wm2）登录配置是否就绪：凭据文件、权限、TOTP 参数、目标节点；未配置时返回获取凭据的完整步骤。默认只读本地文件，probe=true 时额外探测各节点 22 端口。',
+  description: '检查未名 HPC（wm1/wm2）登录配置是否就绪：凭据文件、权限、TOTP 参数、目标节点、本机 ssh/askpass 支持情况；未配置时返回获取凭据的完整步骤。默认只读本地文件，probe=true 时额外检查校园网/VPN 与各节点 22 端口（并给出未连校园网或 VPN 的提示）。',
   parameters: {
-    probe: { type: 'boolean', description: '是否探测每个目标节点的 SSH 端口可达性（每台约 3 秒），默认 false。' },
+    probe: { type: 'boolean', description: '是否执行网络预检：并行探测目标节点 22 端口，并判断当前是否在校园网/VPN 内（通常 3–5 秒），默认 false。' },
   },
   output: { schema: statusSchema, render: (_args, value) => text(renderStatus(value)) },
   async execute(args, exec) {
     const path = credentialsPath()
     const summary = describeCredentials(await readCredentialsFile(path))
-    const targets = []
-    for (const target of summary.targets) {
-      let reachable = 'unknown'
-      if (args.probe === true) {
-        reachable = (await probePort(target.host, 22, 3000, exec.signal)) ? 'reachable' : 'unreachable'
-      }
-      targets.push({ ...target, reachable })
-    }
+    const runtime = describeRuntime()
     const issues = issueLines(summary.issues)
+    let targets = summary.targets.map(target => ({ ...target, reachable: 'unknown' }))
+    let network = {
+      status: 'unknown',
+      message: '未执行网络探测（probe=true 可检查校园网/VPN 与节点 22 端口）。',
+      nextStep: '',
+      localCampus: campusInterfaces().length > 0,
+    }
+    if (args.probe === true) {
+      const classified = await classifyNetwork({
+        hosts: summary.targets.map(target => ({ target: target.target, host: target.host })),
+        signal: exec.signal,
+      })
+      targets = summary.targets.map(target => {
+        const found = classified.hosts.find(entry => entry.target === target.target)
+        const reachable = found?.state === 'open' ? 'reachable' : found?.state === 'aborted' ? 'unknown' : 'unreachable'
+        return { ...target, reachable }
+      })
+      network = {
+        status: classified.status,
+        message: classified.message,
+        nextStep: classified.nextStep,
+        localCampus: classified.localCampus.length > 0,
+      }
+    }
+    let nextStep
+    if (!summary.configured) nextStep = setupGuidance(issues[0] ?? '凭据未就绪')
+    else if (runtime.auth !== 'askpass') nextStep = runtime.message
+    else if (network.status === 'unknown') nextStep = '配置已就绪：可直接调用 wm_server_run 执行远程命令；如需确认校园网/VPN，可用 probe=true 检查。'
+    else if (network.status === 'reachable') nextStep = '配置与网络均已就绪：建议先用 hostname; whoami 验证登录。'
+    else nextStep = network.nextStep
     return {
       configured: summary.configured,
       credentialsPath: summary.path,
@@ -250,9 +313,9 @@ const statusTool = defineTool({
       totpFingerprint: summary.totp?.fingerprint ?? '',
       issues,
       targets,
-      nextStep: summary.configured
-        ? '配置已就绪：可直接调用 wm_server_run 执行远程命令，建议先用 hostname; whoami 验证。'
-        : setupGuidance(issues[0] ?? '凭据未就绪'),
+      runtime,
+      network,
+      nextStep,
     }
   },
 })
@@ -362,7 +425,7 @@ const setupTool = defineTool({
 
 const runTool = defineTool({
   name: 'wm_server_run',
-  description: '在未名 HPC 指定节点执行远程 Bash 命令，自动完成密码 + TOTP 认证，返回 stdout、stderr 与退出码。未配置凭据时返回配置步骤，不尝试登录。data 节点可联网，login 节点用于提交和查询调度任务；重计算应提交 Slurm，不在登录节点直接运行。',
+  description: '在未名 HPC 指定节点执行远程 Bash 命令，自动完成密码 + TOTP 认证，返回 stdout、stderr 与退出码。未配置凭据时返回配置步骤，不尝试登录。执行前会探测目标节点 22 端口：不在校园网且未连学校 VPN 时直接返回提醒，不发起认证（可用 skipNetworkCheck 跳过）。data 节点可联网，login 节点用于提交和查询调度任务；重计算应提交 Slurm，不在登录节点直接运行。',
   parameters: {
     target: {
       type: 'string',
@@ -372,6 +435,7 @@ const runTool = defineTool({
     },
     command: { type: 'string', required: true, description: '远程 Bash 命令；一次调用内保持 shell 状态，跨调用不保留。需要失败即停止时自行加 set -euo pipefail。' },
     timeoutSeconds: { type: 'number', description: '本地总超时秒数，默认 180，范围 5–900；超时只终止本地 ssh，不保证远程进程停止。' },
+    skipNetworkCheck: { type: 'boolean', description: '跳过执行前的校园网/VPN 预检，直接尝试 SSH，默认 false。网络预检误报或使用特殊网络路径时可设为 true。' },
   },
   output: { schema: runSchema, render: (_args, value) => text(renderRun(value)) },
   async execute(args, exec) {
@@ -398,6 +462,53 @@ const runTool = defineTool({
     }
     const node = resolvedNode(loaded.config, args.target)
     const address = `${node.user}@${node.host}`
+    const readiness = sshReadiness()
+    if (!readiness.ok) {
+      return {
+        status: 'error',
+        target: args.target,
+        address,
+        exitCode: -1,
+        stdout: '',
+        stderr: '',
+        truncated: false,
+        durationMs: 0,
+        message: readiness.message,
+        nextStep: '按上面的提示配置本机 ssh 客户端后重试；Windows 推荐安装 Git for Windows。',
+      }
+    }
+    if (args.skipNetworkCheck !== true) {
+      const state = await probeTcp(node.host, 22, 2_500, exec.signal)
+      if (state === 'aborted') {
+        return {
+          status: 'aborted',
+          target: args.target,
+          address,
+          exitCode: -1,
+          stdout: '',
+          stderr: '',
+          truncated: false,
+          durationMs: 0,
+          message: '调用已取消；尚未发起 SSH 连接。',
+          nextStep: '需要结果时重新执行。',
+        }
+      }
+      if (state !== 'open') {
+        const network = await classifyNetwork({ hosts: [{ target: args.target, host: node.host }], signal: exec.signal })
+        return {
+          status: 'network-unavailable',
+          target: args.target,
+          address,
+          exitCode: -1,
+          stdout: '',
+          stderr: '',
+          truncated: false,
+          durationMs: 0,
+          message: network.message,
+          nextStep: network.nextStep,
+        }
+      }
+    }
     try {
       const result = await runRemoteCommand({
         target: args.target,
@@ -431,7 +542,7 @@ const runTool = defineTool({
         truncated: false,
         durationMs: 0,
         message: `无法发起 SSH 连接：${error.message}`,
-        nextStep: '检查本机 /usr/bin/ssh 是否可用，以及凭据文件是否完整。',
+        nextStep: '检查本机 ssh 是否可用（macOS/Linux 为 /usr/bin/ssh；Windows 需 Git for Windows 的 ssh.exe），以及凭据文件是否完整。',
       }
     }
   },

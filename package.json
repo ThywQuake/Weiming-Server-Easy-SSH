@@ -1,6 +1,6 @@
 {
   "name": "dsh-weiming-hpc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Connect to the Peking University Weiming HPC cluster (wm1/wm2) with password + TOTP over SSH.",
@@ -29,5 +29,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": "^0.2.2-rc.2"
+  },
+  "scripts": {
+    "test": "node --test"
   }
 }
