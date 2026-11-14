@@ -320,11 +320,51 @@ const statusTool = defineTool({
   },
 })
 
+/** Optional login check used by wm_server_setup after writing credentials. */
+async function verifySetupLogin(path, config) {
+  try {
+    const result = await runRemoteCommand({
+      target: 'wm2-data',
+      config,
+      command: 'hostname; whoami',
+      timeoutMs: 90_000,
+      credentialsPath: path,
+    })
+    return {
+      verified: result.exitCode === 0 ? 'ok' : 'failed',
+      verifyDetail: clip((result.stdout + result.stderr).trim(), 1200) || `退出码 ${result.exitCode}`,
+    }
+  } catch (error) {
+    return { verified: 'failed', verifyDetail: clip(error.message, 1200) }
+  }
+}
+
+/** Shared success result for both the full and the account-only setup paths. */
+function completedSetup({ path, account, summary, verified, verifyDetail, message }) {
+  return setupResult({
+    ok: true,
+    written: true,
+    credentialsPath: path,
+    account,
+    hasPassword: summary.passwordStored,
+    totpAlgorithm: summary.totp?.algorithm ?? '',
+    totpDigits: summary.totp?.digits ?? 0,
+    totpPeriod: summary.totp?.period ?? 0,
+    totpFingerprint: summary.totp?.fingerprint ?? '',
+    verified,
+    verifyDetail,
+    message,
+    nextStep: verified === 'ok'
+      ? '登录验证通过，可以开始用 wm_server_run 执行远程命令。'
+      : '可用 wm_server_status 复查配置，再用 wm_server_run 执行 hostname 验证登录。',
+  })
+}
+
 const setupTool = defineTool({
   name: 'wm_server_setup',
-  description: '写入未名 HPC 登录凭据。输入用户在 HPC 动态口令页面用微信扫码后复制的文字（otpauth://... 或 Base32 密钥）、HPC 登录密码和账号；校验后写入 ~/.config/wm2/credentials.json（权限 600）。账号为必填项，插件不内置默认账号。返回值只含密钥指纹，不含密码或密钥本身。',
+  description: '写入未名 HPC 登录凭据。完整配置：提供扫码后复制的文字（otpauth://... 或 Base32 密钥）、HPC 登录密码和账号；校验后写入 ~/.config/wm2/credentials.json（权限 600）。只补账号：省略 bindingText，保留已有的密码与 TOTP 密钥，仅更新账号（用于 0.1.x 升级）。账号为必填项，插件不内置默认账号。返回值只含密钥指纹，不含密码或密钥本身。',
   parameters: {
-    bindingText: { type: 'string', required: true, description: '扫码后复制的文字，常见形式为 otpauth://totp/...?secret=...；也接受单独的 Base32 密钥或带“密钥：”标签的文字。' },
+    bindingText: { type: 'string', description: '扫码后复制的文字，常见形式为 otpauth://totp/...?secret=...；也接受单独的 Base32 密钥或带“密钥：”标签的文字。省略时只更新账号，需要现有凭据里已有可用的密码和 TOTP 密钥。' },
     password: { type: 'string', description: 'HPC 登录密码；已保存过密码时可省略，省略且无既有密码时不写入。' },
     account: { type: 'string', required: true, description: 'HPC 账号（学号/工号），必填；插件不内置默认账号，也不会从绑定文字或旧配置里猜账号。' },
     verify: { type: 'boolean', description: '写入后是否立即在 wm2-data 执行一次 hostname 验证，默认 false；失败不会回滚已写入的凭据。' },
@@ -333,19 +373,6 @@ const setupTool = defineTool({
   async execute(args) {
     const path = credentialsPath()
     const existing = await readCredentialsFile(path)
-    let parsed
-    try {
-      parsed = parseBindingText(args.bindingText)
-    } catch (error) {
-      if (error instanceof BindingError) {
-        return setupResult({
-          credentialsPath: path,
-          message: `无法解析二维码文字：${error.message}`,
-          nextStep: '请让用户重新扫码并复制完整文字；仍失败时可请用户把文字原样再发一次。',
-        })
-      }
-      throw error
-    }
     const account = typeof args.account === 'string' ? args.account.trim() : ''
     if (account === '') {
       return setupResult({
@@ -356,6 +383,55 @@ const setupTool = defineTool({
     }
     if (!ACCOUNT_PATTERN.test(account)) {
       return setupResult({ credentialsPath: path, message: `账号格式不合法：${account}`, nextStep: '请提供学号/工号形式的账号。' })
+    }
+
+    const bindingText = typeof args.bindingText === 'string' ? args.bindingText.trim() : ''
+    if (bindingText === '') {
+      const blocking = existing.issues.filter(issue => issue !== 'account')
+      if (blocking.length > 0) {
+        return setupResult({
+          credentialsPath: path,
+          account,
+          message: `只更新账号需要已有的密码和 TOTP 密钥：${issueLines(blocking).join('；')}`,
+          nextStep: '请提供扫码文字和密码完成完整配置，或先用 wm_server_status 修复凭据文件。',
+        })
+      }
+      await writeCredentials(path, { user: account })
+      const loaded = await readCredentialsFile(path)
+      if (!loaded.ok) {
+        return setupResult({
+          credentialsPath: path,
+          account,
+          message: `写入后校验失败：${issueLines(loaded.issues).join('；')}`,
+          nextStep: '检查凭据文件的权限与内容后重试。',
+        })
+      }
+      const summary = describeCredentials(loaded)
+      let verified = 'not-requested'
+      let verifyDetail = ''
+      if (args.verify === true) ({ verified, verifyDetail } = await verifySetupLogin(path, loaded.config))
+      return completedSetup({
+        path,
+        account,
+        summary,
+        verified,
+        verifyDetail,
+        message: '账号已更新（保留原有密码和 TOTP 密钥）。',
+      })
+    }
+
+    let parsed
+    try {
+      parsed = parseBindingText(bindingText)
+    } catch (error) {
+      if (error instanceof BindingError) {
+        return setupResult({
+          credentialsPath: path,
+          message: `无法解析二维码文字：${error.message}`,
+          nextStep: '请让用户重新扫码并复制完整文字；仍失败时可请用户把文字原样再发一次。',
+        })
+      }
+      throw error
     }
     const storedPassword = typeof existing.config?.password === 'string' ? existing.config.password : ''
     const password = typeof args.password === 'string' && args.password.length > 0 ? args.password : storedPassword
@@ -387,38 +463,14 @@ const setupTool = defineTool({
     const summary = describeCredentials(loaded)
     let verified = 'not-requested'
     let verifyDetail = ''
-    if (args.verify === true) {
-      try {
-        const result = await runRemoteCommand({
-          target: 'wm2-data',
-          config: loaded.config,
-          command: 'hostname; whoami',
-          timeoutMs: 90_000,
-          credentialsPath: path,
-        })
-        verified = result.exitCode === 0 ? 'ok' : 'failed'
-        verifyDetail = clip((result.stdout + result.stderr).trim(), 1200) || `退出码 ${result.exitCode}`
-      } catch (error) {
-        verified = 'failed'
-        verifyDetail = clip(error.message, 1200)
-      }
-    }
-    return setupResult({
-      ok: true,
-      written: true,
-      credentialsPath: path,
+    if (args.verify === true) ({ verified, verifyDetail } = await verifySetupLogin(path, loaded.config))
+    return completedSetup({
+      path,
       account,
-      hasPassword: true,
-      totpAlgorithm: summary.totp?.algorithm ?? '',
-      totpDigits: summary.totp?.digits ?? 0,
-      totpPeriod: summary.totp?.period ?? 0,
-      totpFingerprint: summary.totp?.fingerprint ?? '',
+      summary,
       verified,
       verifyDetail,
       message: '凭据已写入。',
-      nextStep: verified === 'ok'
-        ? '登录验证通过，可以开始用 wm_server_run 执行远程命令。'
-        : '可用 wm_server_status 复查配置，再用 wm_server_run 执行 hostname 验证登录。',
     })
   },
 })

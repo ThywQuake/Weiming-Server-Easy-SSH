@@ -9,7 +9,7 @@ The bundle contributes three tools and one runtime skill:
 | Tool | Purpose |
 | --- | --- |
 | `wm_server_status` | Checks the credentials file, permissions, TOTP parameters, target nodes and the local ssh/askpass support. `probe: true` also classifies the campus network / VPN path. |
-| `wm_server_setup` | Parses the text copied from the HPC one-time-password QR code (WeChat scan), validates the TOTP secret, and writes the credentials file with mode `600`. Requires an explicit `account`. |
+| `wm_server_setup` | Parses the text copied from the HPC one-time-password QR code (WeChat scan), validates the TOTP secret, and writes the credentials file with mode `600`. Requires an explicit `account`. With `bindingText` omitted it only updates the account, keeping the stored password and TOTP secret (the 0.1.x upgrade path). |
 | `wm_server_run` | Probes the target's port 22 first: outside the campus network and without the school VPN it returns `network-unavailable` instead of submitting a password or OTP. Otherwise it runs one remote Bash login command with password + TOTP and returns stdout, stderr and the exit code. |
 
 ## Platform support
@@ -91,8 +91,27 @@ network (PKU Secure/PKU or the wired network) or to the school VPN and retry:
    login password, and `account` = your student/staff ID. The account is
    required: the bundle has no built-in default and never guesses one. Add
    `verify: true` to run `hostname; whoami` on `wm2-data` afterwards.
+   Upgrading from 0.1.x? That version had no stored account (it used a built-in
+   default), so the new status reports `account` as missing. Call
+   `wm_server_setup` with only `account` — no new QR scan is needed; the stored
+   password and TOTP secret are kept.
 4. Call `wm_server_run` to verify, for example
    `command: 'hostname; pwd; ls -lah -- "$HOME"'` with `target: 'wm2-login'`.
+
+## Upgrading from 0.1.x
+
+0.1.x had no account field in `~/.config/wm2/credentials.json`: it fell back to
+a built-in default. 0.2.x requires an explicit account, so after the upgrade
+`wm_server_status` reports the `account` issue even though the password and TOTP
+secret are still valid. Fix it without rebinding the OTP secret:
+
+```text
+wm_server_setup(account: "2023000000")
+```
+
+Omitting `bindingText` keeps the existing `password`, `totp_secret`, digits,
+period and algorithm and only writes `user`. If the credentials file is missing
+or otherwise unusable, the tool refuses and asks for a full setup instead.
 
 ## Credentials
 

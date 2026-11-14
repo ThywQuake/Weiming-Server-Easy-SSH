@@ -1,6 +1,6 @@
 {
   "name": "dsh-weiming-hpc",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "Connect to the Peking University Weiming HPC cluster (wm1/wm2) with password + TOTP over SSH.",
