@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "未名 HPC",
+    "description": "用密码 + 动态口令（TOTP）通过 SSH 登录北京大学未名服务器（wm1-data、wm1-login、wm2-data、wm2-login），提供 wm_server_status、wm_server_setup、wm_server_run 三个工具。每次调用先检查 ~/.config/wm2/credentials.json；缺少配置时返回获取步骤而不尝试登录：打开 HPC 动态口令绑定页，用微信扫描二维码，复制识别出的文字（otpauth://...），再连同账号密码交给 wm_server_setup。密码与密钥只写入该文件（权限 600）且不回显，工具只返回密钥指纹。每次连接每种凭据最多提交一次；不支持文件传输。"
+  }
+}
