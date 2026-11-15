@@ -57,8 +57,11 @@ test('clusters and custom targets', () => {
 test('legacy wm2 credentials migrate to the neutral path', async () => {
   const home = await temporaryDirectory()
   const previousHome = process.env.HOME
+  const previousUserProfile = process.env.USERPROFILE
   const previousOverride = process.env.WM_HPC_CREDENTIALS
+  // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
   process.env.HOME = home
+  process.env.USERPROFILE = home
   delete process.env.WM_HPC_CREDENTIALS
   try {
     const legacy = join(home, '.config', 'wm2', 'credentials.json')
@@ -83,6 +86,8 @@ test('legacy wm2 credentials migrate to the neutral path', async () => {
   } finally {
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousUserProfile
     if (previousOverride === undefined) delete process.env.WM_HPC_CREDENTIALS
     else process.env.WM_HPC_CREDENTIALS = previousOverride
   }
