@@ -265,7 +265,7 @@ function renderRun(value) {
 
 const statusTool = defineTool({
   name: 'wm_server_status',
-  description: '检查未名 HPC 登录配置是否就绪：凭据文件、权限、TOTP 参数、目标节点（未名一号/二号/生科一号）、本机 ssh/askpass 支持情况；未配置时返回获取凭据的完整步骤。默认读取本地文件（首次会把旧 wm2 路径迁移到新路径），probe=true 时额外检查校园网/VPN 与各节点 22 端口（并给出未连校园网或 VPN 的提示）。',
+  description: '检查未名 HPC 登录配置是否就绪：凭据文件、权限、TOTP 参数、目标节点（未名一号/二号/生科一号）、本机 ssh/askpass 支持情况；未配置时返回获取凭据的完整步骤。默认读取本地文件，probe=true 时额外检查校园网/VPN 与各节点 22 端口（并给出未连校园网或 VPN 的提示）。',
   parameters: {
     probe: { type: 'boolean', description: '是否执行网络预检：并行探测目标节点 22 端口，并判断当前是否在校园网/VPN 内（通常 3–5 秒），默认 false。' },
   },
@@ -369,7 +369,7 @@ function completedSetup({ path, account, summary, verified, verifyDetail, messag
 
 const setupTool = defineTool({
   name: 'wm_server_setup',
-  description: '写入未名 HPC 登录凭据。完整配置：提供扫码后复制的文字（otpauth://... 或 Base32 密钥）、HPC 登录密码和账号；校验后写入 ~/.config/weiming-hpc/credentials.json（权限 600，旧版 wm2 路径会自动迁移）。只补账号：省略 bindingText，保留已有的密码与 TOTP 密钥，仅更新账号（用于 0.1.x 升级）。账号为必填项，插件不内置默认账号。返回值只含密钥指纹，不含密码或密钥本身。',
+  description: '写入未名 HPC 登录凭据。完整配置：提供扫码后复制的文字（otpauth://... 或 Base32 密钥）、HPC 登录密码和账号；校验后写入 ~/.config/weiming-hpc/credentials.json（权限 600）。只补账号：省略 bindingText，保留已有的密码与 TOTP 密钥，仅更新账号。账号为必填项，插件不内置默认账号。返回值只含密钥指纹，不含密码或密钥本身。',
   parameters: {
     bindingText: { type: 'string', description: '扫码后复制的文字，常见形式为 otpauth://totp/...?secret=...；也接受单独的 Base32 密钥或带“密钥：”标签的文字。省略时只更新账号，需要现有凭据里已有可用的密码和 TOTP 密钥。' },
     password: { type: 'string', description: 'HPC 登录密码；已保存过密码时可省略，省略且无既有密码时不写入。' },

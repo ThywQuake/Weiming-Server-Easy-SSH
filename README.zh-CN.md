@@ -13,7 +13,7 @@ DeepSeek Harness 插件。通过密码 + 动态口令（TOTP）完成 SSH 认证
 | 工具 | 用途 |
 | --- | --- |
 | `wm_server_status` | 检查凭据文件、权限、TOTP 参数、目标节点和本机 ssh/askpass 支持情况；`probe: true` 时额外判断校园网/VPN 路径。 |
-| `wm_server_setup` | 解析扫码得到的 OTP 绑定文字，校验 TOTP 密钥，并以权限 `600` 写入凭据文件。`account` 必填；省略 `bindingText` 时只更新账号（0.1.x 升级路径）；`verify: true` 会执行一次 `hostname; whoami`，默认在 `wm1-login`，可用 `verifyTarget` 指定节点。 |
+| `wm_server_setup` | 解析扫码得到的 OTP 绑定文字，校验 TOTP 密钥，并以权限 `600` 写入凭据文件。`account` 必填；省略 `bindingText` 时只更新账号；`verify: true` 会执行一次 `hostname; whoami`，默认在 `wm1-login`，可用 `verifyTarget` 指定节点。 |
 | `wm_server_run` | 先探测目标节点 22 端口：不在校园网且未连 VPN 时返回 `network-unavailable`，不会提交密码或 OTP；可达时执行一条远程 Bash 命令并返回 stdout、stderr 和退出码。 |
 
 ## 集群与节点
@@ -104,27 +104,6 @@ Windows 上请先安装 Git for Windows。
 4. 调用 `wm_server_run` 验证，例如 `command: 'hostname; pwd; ls -lah -- "$HOME"'`，
    `target` 选 `wm1-login`、`wm2-login` 或 `wmsk1-login`。
 
-## 升级说明
-
-### 从 0.2.x 升级到 0.3.x
-
-凭据路径从 `~/.config/wm2/credentials.json` 改为中性的
-`~/.config/weiming-hpc/credentials.json`。首次调用任一工具时会自动复制迁移，旧文件
-保留作备份，不会删除。`WM_HPC_CREDENTIALS` 仍然优先。
-
-### 从 0.1.x 升级
-
-0.1.x 没有保存账号字段，而是回退到内置默认学号。升级后 `wm_server_status` 会报告
-`account` 问题，但密码和 TOTP 密钥通常仍然有效。不需要重新扫码：
-
-```text
-wm_server_setup(account: "2023000000")
-```
-
-省略 `bindingText` 时会保留原有的 `password`、`totp_secret`、`digits`、`period`、
-`algorithm` 和 `nodes`，只补写 `user`。如果凭据文件缺失或存在其他问题，工具会拒绝
-并提示完整配置。
-
 ## 凭据
 
 默认路径为 `~/.config/weiming-hpc/credentials.json`；设置 `WM_HPC_CREDENTIALS`
@@ -160,7 +139,7 @@ node --test
 ```
 
 覆盖 TOTP、绑定文字解析、凭据权限与合并、ssh 失败分类、校园网分类（使用本地 TCP
-监听端口）以及旧路径迁移。CI 在 Linux、macOS、Windows 三个平台运行同一套测试；
+监听端口）以及凭据路径迁移。CI 在 Linux、macOS、Windows 三个平台运行同一套测试；
 Windows job 只验证 ssh 发现和路径映射等逻辑，不做真实的密码登录。
 
 ## 故障排查
@@ -171,7 +150,6 @@ Windows job 只验证 ssh 发现和路径映射等逻辑，不做真实的密码
 | `host-key` | 节点不在 `known_hosts`，或主机密钥变了。先在终端连接一次，通过可信渠道核对指纹后再重试；不要关闭 `StrictHostKeyChecking`。 |
 | `auth-failed` | 密码或 OTP 不匹配，或 OTP 绑定未完成。检查手机时间和绑定状态，最多再试一次。 |
 | `error`，提示 ssh 不可用 | 安装可用的 ssh 客户端（macOS/Linux 用系统 OpenSSH；Windows 用 Git for Windows），然后重新运行 `wm_server_status`。 |
-| 升级后提示缺少账号 | 用 `wm_server_setup(account: "…")` 补账号，不需要重新扫码。 |
 
 ## 环境变量
 
