@@ -1,16 +1,39 @@
 # dsh-weiming-hpc
 
 A DeepSeek Harness bundle for logging in to the Peking University Weiming HPC
-cluster (`wm1-data`, `wm1-login`, `wm2-data`, `wm2-login`) with a password and a
-TOTP code, and running remote Bash commands from the agent.
+platform with a password and a TOTP code, and running remote Bash commands from
+the agent. Built-in clusters: Weiming No.1 (`wm1-*`), Weiming No.2 (`wm2-*`) and
+Weiming Life Sciences No.1 (`wmsk1-*`); additional nodes can be declared in the
+credentials file.
 
 The bundle contributes three tools and one runtime skill:
 
 | Tool | Purpose |
 | --- | --- |
 | `wm_server_status` | Checks the credentials file, permissions, TOTP parameters, target nodes and the local ssh/askpass support. `probe: true` also classifies the campus network / VPN path. |
-| `wm_server_setup` | Parses the text copied from the HPC one-time-password QR code (WeChat scan), validates the TOTP secret, and writes the credentials file with mode `600`. Requires an explicit `account`. With `bindingText` omitted it only updates the account, keeping the stored password and TOTP secret (the 0.1.x upgrade path). |
+| `wm_server_setup` | Parses the text copied from the HPC one-time-password QR code, validates the TOTP secret, and writes the credentials file with mode `600`. Requires an explicit `account`. With `bindingText` omitted it only updates the account, keeping the stored password and TOTP secret (the 0.1.x upgrade path). `verify: true` runs `hostname; whoami`, on `wm1-login` by default or on `verifyTarget`. |
 | `wm_server_run` | Probes the target's port 22 first: outside the campus network and without the school VPN it returns `network-unavailable` instead of submitting a password or OTP. Otherwise it runs one remote Bash login command with password + TOTP and returns stdout, stderr and the exit code. |
+
+## Clusters and nodes
+
+Addresses follow the official guide at
+https://hpc.pku.edu.cn/ug/guide/access/ (no key authentication; password + OTP
+only):
+
+| Cluster | Login node | Data node |
+| --- | --- | --- |
+| Weiming No.1 (`wm1`) | `wm1-login.pku.edu.cn` | `wm1-data.pku.edu.cn` |
+| Weiming No.2 (`wm2`) | `wm2-login.pku.edu.cn` | `wm2-data.pku.edu.cn` |
+| Weiming Life Sciences No.1 (`wmsk1`) | `wmsk1-login.pku.edu.cn` | `wmsk1-data.pku.edu.cn` |
+
+Login nodes submit and query jobs but have no internet access; data nodes have
+internet access and storage but cannot submit jobs. `target` must be chosen
+explicitly. Other nodes, such as the teaching cluster's `wmjx2-login`, can be
+declared in `nodes` and then used as a target:
+
+```json
+{ "nodes": { "wmjx2-login": { "host": "wmjx2-login.pku.edu.cn" } } }
+```
 
 ## Platform support
 
@@ -84,24 +107,28 @@ network (PKU Secure/PKU or the wired network) or to the school VPN and retry:
 1. Call `wm_server_status`. On a machine without credentials it returns
    `configured: false` together with the setup steps instead of attempting a
    login.
-2. Open the HPC one-time-password binding page, generate the QR code, scan it
-   with WeChat, and copy the recognized text (usually an `otpauth://totp/...`
-   URI). Scanning completes the binding.
+2. Open https://hpc.pku.edu.cn/authotp/otp , sign in, click **重新绑定手机令牌**
+   and bind the QR code with FreeOTP / Google Authenticator. To give the secret
+   to this bundle, scan the same QR code with a text-reading scanner (for
+   example WeChat) and copy the `otpauth://totp/...` text. Scanning completes
+   the binding.
 3. Call `wm_server_setup` with `bindingText` = that text, `password` = the HPC
    login password, and `account` = your student/staff ID. The account is
    required: the bundle has no built-in default and never guesses one. Add
-   `verify: true` to run `hostname; whoami` on `wm2-data` afterwards.
+   `verify: true` to run `hostname; whoami` afterwards (on `wm1-login` by
+   default; pass `verifyTarget` for another node).
    Upgrading from 0.1.x? That version had no stored account (it used a built-in
    default), so the new status reports `account` as missing. Call
    `wm_server_setup` with only `account` — no new QR scan is needed; the stored
    password and TOTP secret are kept.
 4. Call `wm_server_run` to verify, for example
-   `command: 'hostname; pwd; ls -lah -- "$HOME"'` with `target: 'wm2-login'`.
+   `command: 'hostname; pwd; ls -lah -- "$HOME"'` with `target: 'wm1-login'`,
+   `'wm2-login'` or `'wmsk1-login'`.
 
 ## Upgrading from 0.1.x
 
-0.1.x had no account field in `~/.config/wm2/credentials.json`: it fell back to
-a built-in default. 0.2.x requires an explicit account, so after the upgrade
+0.1.x had no account field in its credentials file: it fell back to a built-in
+default. 0.2.x requires an explicit account, so after the upgrade
 `wm_server_status` reports the `account` issue even though the password and TOTP
 secret are still valid. Fix it without rebinding the OTP secret:
 
@@ -115,8 +142,9 @@ or otherwise unusable, the tool refuses and asks for a full setup instead.
 
 ## Credentials
 
-The default path is `~/.config/wm2/credentials.json`; set `WM_HPC_CREDENTIALS`
-to use another file. On macOS and Linux the file must be owned by the current
+The default path is `~/.config/weiming-hpc/credentials.json`. The old
+`~/.config/wm2/credentials.json` is copied there automatically on first use
+(the old file is kept as a backup), and `WM_HPC_CREDENTIALS` overrides both. On macOS and Linux the file must be owned by the current
 user and readable only by them (`chmod 600`); otherwise the tools refuse to use
 it and report `permissions` or `owner`. On Windows the POSIX mode bits are not
 meaningful, so the tools rely on the ACLs of the user profile: keep the file

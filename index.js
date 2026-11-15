@@ -8,8 +8,11 @@
 import { defineTool, ToolArgsError } from '@deepseek-ai/dsh-tools'
 import {
   TARGETS,
+  clusterOf,
   credentialsPath,
   describeCredentials,
+  isKnownTarget,
+  loadCredentials,
   readCredentialsFile,
   resolvedNode,
   writeCredentials,
@@ -149,7 +152,9 @@ function renderStatus(value) {
   lines.push('目标节点：')
   for (const target of value.targets) {
     const reach = target.reachable === 'reachable' ? '（22 端口可达）' : target.reachable === 'unreachable' ? '（22 端口不可达）' : ''
-    lines.push(`  - ${target.target} → ${target.user}@${target.host}${reach}`)
+    const cluster = clusterOf(target.target)
+    const label = cluster === '' ? '' : `[${cluster}] `
+    lines.push(`  - ${label}${target.target} → ${target.user}@${target.host}${reach}`)
   }
   if (value.network.status !== 'unknown') {
     lines.push(`网络：${value.network.message}`)
@@ -260,14 +265,13 @@ function renderRun(value) {
 
 const statusTool = defineTool({
   name: 'wm_server_status',
-  description: '检查未名 HPC（wm1/wm2）登录配置是否就绪：凭据文件、权限、TOTP 参数、目标节点、本机 ssh/askpass 支持情况；未配置时返回获取凭据的完整步骤。默认只读本地文件，probe=true 时额外检查校园网/VPN 与各节点 22 端口（并给出未连校园网或 VPN 的提示）。',
+  description: '检查未名 HPC 登录配置是否就绪：凭据文件、权限、TOTP 参数、目标节点（未名一号/二号/生科一号）、本机 ssh/askpass 支持情况；未配置时返回获取凭据的完整步骤。默认读取本地文件（首次会把旧 wm2 路径迁移到新路径），probe=true 时额外检查校园网/VPN 与各节点 22 端口（并给出未连校园网或 VPN 的提示）。',
   parameters: {
     probe: { type: 'boolean', description: '是否执行网络预检：并行探测目标节点 22 端口，并判断当前是否在校园网/VPN 内（通常 3–5 秒），默认 false。' },
   },
   output: { schema: statusSchema, render: (_args, value) => text(renderStatus(value)) },
   async execute(args, exec) {
-    const path = credentialsPath()
-    const summary = describeCredentials(await readCredentialsFile(path))
+    const summary = describeCredentials(await loadCredentials())
     const runtime = describeRuntime()
     const issues = issueLines(summary.issues)
     let targets = summary.targets.map(target => ({ ...target, reachable: 'unknown' }))
@@ -321,10 +325,13 @@ const statusTool = defineTool({
 })
 
 /** Optional login check used by wm_server_setup after writing credentials. */
-async function verifySetupLogin(path, config) {
+async function verifySetupLogin(path, config, target) {
+  if (!isKnownTarget(config, target)) {
+    return { verified: 'failed', verifyDetail: `未知节点：${target}；请检查 verifyTarget 或 nodes 配置。` }
+  }
   try {
     const result = await runRemoteCommand({
-      target: 'wm2-data',
+      target,
       config,
       command: 'hostname; whoami',
       timeoutMs: 90_000,
@@ -362,17 +369,18 @@ function completedSetup({ path, account, summary, verified, verifyDetail, messag
 
 const setupTool = defineTool({
   name: 'wm_server_setup',
-  description: '写入未名 HPC 登录凭据。完整配置：提供扫码后复制的文字（otpauth://... 或 Base32 密钥）、HPC 登录密码和账号；校验后写入 ~/.config/wm2/credentials.json（权限 600）。只补账号：省略 bindingText，保留已有的密码与 TOTP 密钥，仅更新账号（用于 0.1.x 升级）。账号为必填项，插件不内置默认账号。返回值只含密钥指纹，不含密码或密钥本身。',
+  description: '写入未名 HPC 登录凭据。完整配置：提供扫码后复制的文字（otpauth://... 或 Base32 密钥）、HPC 登录密码和账号；校验后写入 ~/.config/weiming-hpc/credentials.json（权限 600，旧版 wm2 路径会自动迁移）。只补账号：省略 bindingText，保留已有的密码与 TOTP 密钥，仅更新账号（用于 0.1.x 升级）。账号为必填项，插件不内置默认账号。返回值只含密钥指纹，不含密码或密钥本身。',
   parameters: {
     bindingText: { type: 'string', description: '扫码后复制的文字，常见形式为 otpauth://totp/...?secret=...；也接受单独的 Base32 密钥或带“密钥：”标签的文字。省略时只更新账号，需要现有凭据里已有可用的密码和 TOTP 密钥。' },
     password: { type: 'string', description: 'HPC 登录密码；已保存过密码时可省略，省略且无既有密码时不写入。' },
     account: { type: 'string', required: true, description: 'HPC 账号（学号/工号），必填；插件不内置默认账号，也不会从绑定文字或旧配置里猜账号。' },
-    verify: { type: 'boolean', description: '写入后是否立即在 wm2-data 执行一次 hostname 验证，默认 false；失败不会回滚已写入的凭据。' },
+    verify: { type: 'boolean', description: '写入后是否立即执行一次 hostname 验证，默认 false；失败不会回滚已写入的凭据。' },
+    verifyTarget: { type: 'string', description: 'verify=true 时使用的节点，默认 wm1-login；可改为 wm2-login、wmsk1-login 或自定义节点。' },
   },
   output: { schema: setupSchema, render: (_args, value) => text(renderSetup(value)) },
   async execute(args) {
     const path = credentialsPath()
-    const existing = await readCredentialsFile(path)
+    const existing = await loadCredentials()
     const account = typeof args.account === 'string' ? args.account.trim() : ''
     if (account === '') {
       return setupResult({
@@ -396,7 +404,7 @@ const setupTool = defineTool({
           nextStep: '请提供扫码文字和密码完成完整配置，或先用 wm_server_status 修复凭据文件。',
         })
       }
-      await writeCredentials(path, { user: account })
+      await writeCredentials(path, { ...(existing.config ?? {}), user: account })
       const loaded = await readCredentialsFile(path)
       if (!loaded.ok) {
         return setupResult({
@@ -409,7 +417,10 @@ const setupTool = defineTool({
       const summary = describeCredentials(loaded)
       let verified = 'not-requested'
       let verifyDetail = ''
-      if (args.verify === true) ({ verified, verifyDetail } = await verifySetupLogin(path, loaded.config))
+      if (args.verify === true) {
+        const verifyTarget = typeof args.verifyTarget === 'string' && args.verifyTarget.trim() !== '' ? args.verifyTarget.trim() : TARGETS[0]
+        ({ verified, verifyDetail } = await verifySetupLogin(path, loaded.config, verifyTarget))
+      }
       return completedSetup({
         path,
         account,
@@ -444,6 +455,7 @@ const setupTool = defineTool({
       })
     }
     await writeCredentials(path, {
+      ...(existing.config ?? {}),
       totp_secret: parsed.totp_secret,
       digits: parsed.digits,
       period: parsed.period,
@@ -463,7 +475,10 @@ const setupTool = defineTool({
     const summary = describeCredentials(loaded)
     let verified = 'not-requested'
     let verifyDetail = ''
-    if (args.verify === true) ({ verified, verifyDetail } = await verifySetupLogin(path, loaded.config))
+    if (args.verify === true) {
+      const verifyTarget = typeof args.verifyTarget === 'string' && args.verifyTarget.trim() !== '' ? args.verifyTarget.trim() : TARGETS[0]
+      ({ verified, verifyDetail } = await verifySetupLogin(path, loaded.config, verifyTarget))
+    }
     return completedSetup({
       path,
       account,
@@ -482,8 +497,7 @@ const runTool = defineTool({
     target: {
       type: 'string',
       required: true,
-      enum: TARGETS,
-      description: '目标节点：wm1-data/wm2-data 用于下载与数据传输，wm1-login/wm2-login 用于提交和查询作业；必须显式选择。',
+      description: '目标节点，必须显式选择。内置：wm1-login/wm1-data（未名一号）、wm2-login/wm2-data（未名二号）、wmsk1-login/wmsk1-data（未名生科一号）；也可使用凭据文件 nodes 里自定义的节点名。login 节点用于提交和查询作业，data 节点可联网传输。',
     },
     command: { type: 'string', required: true, description: '远程 Bash 命令；一次调用内保持 shell 状态，跨调用不保留。需要失败即停止时自行加 set -euo pipefail。' },
     timeoutSeconds: { type: 'number', description: '本地总超时秒数，默认 180，范围 5–900；超时只终止本地 ssh，不保证远程进程停止。' },
@@ -495,8 +509,8 @@ const runTool = defineTool({
     if (command === '') throw new ToolArgsError(['invalid command: 期望非空字符串'])
     const seconds = Number.isFinite(args.timeoutSeconds) ? args.timeoutSeconds : 180
     const timeoutMs = Math.min(Math.max(seconds, 5), 900) * 1000
-    const path = credentialsPath()
-    const loaded = await readCredentialsFile(path)
+    const loaded = await loadCredentials()
+    const path = loaded.path
     if (!loaded.ok) {
       const issues = issueLines(loaded.issues)
       return {
@@ -510,6 +524,20 @@ const runTool = defineTool({
         durationMs: 0,
         message: setupGuidance(issues[0] ?? '凭据未就绪'),
         nextStep: '完成配置后再调用 wm_server_run。',
+      }
+    }
+    if (!isKnownTarget(loaded.config, args.target)) {
+      return {
+        status: 'error',
+        target: args.target,
+        address: '',
+        exitCode: -1,
+        stdout: '',
+        stderr: '',
+        truncated: false,
+        durationMs: 0,
+        message: `未知节点：${args.target}。内置节点：${TARGETS.join('、')}。`,
+        nextStep: '内置节点之外可在凭据文件的 nodes 里声明节点（键为节点名，值为 host/user），再作为 target 使用。',
       }
     }
     const node = resolvedNode(loaded.config, args.target)

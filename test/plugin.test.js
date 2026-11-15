@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 
-import { resolvedNode, readCredentialsFile, writeCredentials } from '../lib/config.js'
+import {
+  TARGETS,
+  clusterOf,
+  credentialsPath,
+  isKnownTarget,
+  loadCredentials,
+  readCredentialsFile,
+  resolvedNode,
+  writeCredentials,
+} from '../lib/config.js'
 import { classifyNetwork, probeTcp } from '../lib/network.js'
 import { resolveSsh, scratchBaseDirectory, sshReadiness, toPosixMountPath } from '../lib/platform.js'
 import { BindingError, parseBindingText } from '../lib/setup.js'
@@ -32,6 +41,51 @@ test('RFC 6238 SHA-1 test vector', () => {
     totpCode({ totp_secret: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ', digits: 8, period: 30, algorithm: 'sha1' }, 59_000),
     '94287082',
   )
+})
+
+test('clusters and custom targets', () => {
+  assert.ok(TARGETS.includes('wmsk1-login'))
+  assert.ok(TARGETS.includes('wmsk1-data'))
+  assert.equal(clusterOf('wmsk1-data'), '未名生科一号')
+  assert.equal(clusterOf('wm2-login'), '未名二号')
+  assert.equal(clusterOf('custom-node'), '')
+  assert.equal(isKnownTarget({}, 'wmjx2-login'), false)
+  assert.equal(isKnownTarget({ nodes: { 'wmjx2-login': { host: 'wmjx2-login.pku.edu.cn' } } }, 'wmjx2-login'), true)
+  assert.equal(isKnownTarget({}, '../evil'), false)
+})
+
+test('legacy wm2 credentials migrate to the neutral path', async () => {
+  const home = await temporaryDirectory()
+  const previousHome = process.env.HOME
+  const previousOverride = process.env.WM_HPC_CREDENTIALS
+  process.env.HOME = home
+  delete process.env.WM_HPC_CREDENTIALS
+  try {
+    const legacy = join(home, '.config', 'wm2', 'credentials.json')
+    await mkdir(dirname(legacy), { recursive: true, mode: 0o700 })
+    await writeFile(legacy, JSON.stringify({
+      password: 'secret',
+      totp_secret: 'JBSWY3DPEHPK3PXP',
+      digits: 6,
+      period: 30,
+      algorithm: 'sha1',
+      user: '2023000000',
+    }), { mode: 0o600 })
+    if (process.platform !== 'win32') await chmod(legacy, 0o600)
+    const loaded = await loadCredentials()
+    assert.equal(loaded.ok, true)
+    assert.equal(loaded.path, join(home, '.config', 'weiming-hpc', 'credentials.json'))
+    assert.equal(loaded.path, credentialsPath())
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(loaded.path)).mode & 0o777, 0o600)
+      assert.match(await readFile(legacy, 'utf8'), /totp_secret/u)
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousOverride === undefined) delete process.env.WM_HPC_CREDENTIALS
+    else process.env.WM_HPC_CREDENTIALS = previousOverride
+  }
 })
 
 test('binding text parsing', () => {
