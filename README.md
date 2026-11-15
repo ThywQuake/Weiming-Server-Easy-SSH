@@ -1,10 +1,15 @@
 # dsh-weiming-hpc
 
+English | [简体中文](README.zh-CN.md)
+
 A DeepSeek Harness bundle for logging in to the Peking University Weiming HPC
 platform with a password and a TOTP code, and running remote Bash commands from
 the agent. Built-in clusters: Weiming No.1 (`wm1-*`), Weiming No.2 (`wm2-*`) and
 Weiming Life Sciences No.1 (`wmsk1-*`); additional nodes can be declared in the
 credentials file.
+
+This is an unofficial, community-maintained bundle, not an official PKU HPC
+client.
 
 The bundle contributes three tools and one runtime skill:
 
@@ -53,9 +58,9 @@ MSYS2 `ssh.exe` from Git for Windows and fails fast with an actionable message
 when only the inbox client is available. Running DSH inside WSL uses the Linux
 path instead.
 
-The Windows path is implemented but not covered by this repository's automated
-tests, which run on macOS/Linux; report Windows-specific issues with the output
-of `wm_server_status`.
+The Windows path is implemented, and CI runs the unit tests on Windows as well;
+that job covers ssh discovery and path mapping, not a real password login.
+Report Windows-specific issues with the output of `wm_server_status`.
 
 ## Install
 
@@ -144,9 +149,10 @@ or otherwise unusable, the tool refuses and asks for a full setup instead.
 
 The default path is `~/.config/weiming-hpc/credentials.json`. The old
 `~/.config/wm2/credentials.json` is copied there automatically on first use
-(the old file is kept as a backup), and `WM_HPC_CREDENTIALS` overrides both. On macOS and Linux the file must be owned by the current
-user and readable only by them (`chmod 600`); otherwise the tools refuse to use
-it and report `permissions` or `owner`. On Windows the POSIX mode bits are not
+(the old file is kept as a backup), and `WM_HPC_CREDENTIALS` overrides both. On
+macOS and Linux the file must be owned by the current user and readable only by
+them (`chmod 600`); otherwise the tools refuse to use it and report
+`permissions` or `owner`. On Windows the POSIX mode bits are not
 meaningful, so the tools rely on the ACLs of the user profile: keep the file
 inside your user directory and do not share it.
 
